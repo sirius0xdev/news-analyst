@@ -1,0 +1,14 @@
+# Database adapter for PostgreSQL
+psycopg2-binary==2.9.11
+
+# Network requests for Gemma API and Telegram Bot API
+requests==2.32.3
+
+# (Optional) For local testing with .env files
+python-dotenv==1.0.1
+
+google-genai
+
+ollama
+
+yfinance

@@ -1,0 +1,13 @@
+{
+  "build": {
+    "context": "..",
+    "dockerfile": "Dockerfile",
+    "runArgs": [
+      "--add-host=host.docker.internal:host-gateway"
+    ]
+  }
+}
+
+
+
+
