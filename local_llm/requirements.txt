@@ -9,6 +9,6 @@ python-dotenv==1.0.1
 
 google-genai
 
-ollama
+openai>=1.0.0
 
 yfinance

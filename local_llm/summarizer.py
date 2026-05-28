@@ -1,11 +1,9 @@
 import yfinance as yf
-from datetime import datetime 
+from datetime import datetime
 import psycopg2
-import requests
 import os
 import textwrap
-import time
-import ollama
+from openai import OpenAI
 # --- Configuration ---
 DB_CONFIG = {
     "host": os.getenv("DB_HOST", "postgres-service"),
@@ -14,10 +12,11 @@ DB_CONFIG = {
     "password": os.getenv("DB_PASSWORD"),
     "port": os.getenv("DB_PORT", "5432")
 }
-# Ollama internal K8s address
-LLM_URL = os.getenv("LLM_URL", "http://127.0.0.1:11434/api/generate") 
-MODEL_NAME = os.getenv("MODEL_NAME", "")
-API_KEY = os.getenv("API_KEY", "")
+# OpenAI-compatible LLM client (vLLM, Ollama with OpenAI route, etc.)
+client = OpenAI(
+    base_url=os.getenv("LLM_BASE_URL", "http://127.0.0.1:8000/v1"),
+    api_key=os.getenv("LLM_API_KEY", "sk-dummy"),
+)
 
 
 FUTURES_TICKERS = {
@@ -87,47 +86,17 @@ def get_recent_news():
         print(f"Database error: {e}")
         return []
 
-def wait_for_ollama(max_wait=600, interval=10):  # 10 min max
-    print("Waiting for Ollama model to be ready...")
-    start = time.time()
-    while time.time() - start < max_wait:
-        try:
-            resp = requests.get("http://localhost:11434/api/tags", timeout=5)
-            if resp.status_code == 200:
-                models = resp.json().get("models", [])
-                if any(m["name"].startswith(MODEL_NAME) for m in models):
-                    print("Ollama ready!")
-                    return True
-        except Exception as e:
-            print(f"Ollama check failed: {e}")
-        time.sleep(interval)
-    print("Timeout waiting for Ollama – exiting")
-    return False
-
-# Call it early
-if not wait_for_ollama():
-    exit(1)  # Or raise error
-
 def call_llm(prompt):
     try:
-        response = ollama.generate(
-            model=MODEL_NAME,
-            prompt=prompt,
-            options={
-                "num_predict": 2048,
-                "temperature": 0.6,
-                "top_p": 0.9,
-                "top_k": 40,
-                "num_ctx": 32768,
-                "repeat_penalty": 1.1,
-            },
-            stream=False  # explicit
+        response = client.chat.completions.create(
+            model=os.getenv("MODEL_NAME", "edp1096/Huihui-Qwen3.6-27B-abliterated-FP8"),
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=4096,
+            temperature=0.7,
         )
-        print(f"Raw response type: {type(response)}")
-        print(f"Full response object: {response}")
-        return response.response 
+        return response.choices[0].message.content
     except Exception as e:
-        print(f"Ollama lib error: {e}")
+        print(f"LLM API error: {e}")
         return ''
 
 def summarize_news():
