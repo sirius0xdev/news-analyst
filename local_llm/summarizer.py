@@ -1,9 +1,13 @@
 import yfinance as yf
 from datetime import datetime
 import psycopg2
+import requests
 import os
 import textwrap
+import time
+import json
 from openai import OpenAI
+
 # --- Configuration ---
 DB_CONFIG = {
     "host": os.getenv("DB_HOST", "postgres-service"),
@@ -12,11 +16,11 @@ DB_CONFIG = {
     "password": os.getenv("DB_PASSWORD"),
     "port": os.getenv("DB_PORT", "5432")
 }
-# OpenAI-compatible LLM client (vLLM, Ollama with OpenAI route, etc.)
-client = OpenAI(
-    base_url=os.getenv("LLM_BASE_URL", "http://127.0.0.1:8000/v1"),
-    api_key=os.getenv("LLM_API_KEY", "sk-dummy"),
-)
+
+# vLLM OpenAI-compatible endpoint (update in deepseek-configmap.yaml to your vLLM service, e.g. http://a100-brain-vllm.customer1.svc.cluster.local:8000/v1 or rtx6000 one)
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:8000/v1")
+MODEL_NAME = os.getenv("MODEL_NAME", "deepseek-r1")
+API_KEY = os.getenv("API_KEY", "no-key-required")
 
 
 FUTURES_TICKERS = {
@@ -64,8 +68,6 @@ def fetch_current_futures_prices():
     return prices
 
 
-
-
 def get_recent_news():
     
     query = """
@@ -86,22 +88,50 @@ def get_recent_news():
         print(f"Database error: {e}")
         return []
 
+def wait_for_vllm(max_wait=300, interval=5):
+    print("Waiting for vLLM to be ready...")
+    start = time.time()
+    models_url = LLM_BASE_URL.rstrip("/v1") + "/v1/models"
+    while time.time() - start < max_wait:
+        try:
+            resp = requests.get(models_url, timeout=5)
+            if resp.status_code == 200:
+                data = resp.json().get("data", [])
+                model_ids = [m.get("id", "") for m in data]
+                if any(MODEL_NAME.lower() in mid.lower() for mid in model_ids) or model_ids:
+                    print(f"vLLM ready (models: {model_ids})!")
+                    return True
+        except Exception as e:
+            print(f"vLLM check failed: {e}")
+        time.sleep(interval)
+    print("Timeout waiting for vLLM – exiting")
+    return False
+
+# Call it early
+if not wait_for_vllm():
+    exit(1)  # Or raise error
+
 def call_llm(prompt):
     try:
-        response = client.chat.completions.create(
-            model=os.getenv("MODEL_NAME", "edp1096/Huihui-Qwen3.6-27B-abliterated-FP8"),
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=4096,
-            temperature=0.7,
+        client = OpenAI(
+            base_url=LLM_BASE_URL,
+            api_key=API_KEY,
         )
-        return response.choices[0].message.content
+        response = client.completions.create(
+            model=MODEL_NAME,
+            prompt=prompt,
+            max_tokens=2048,
+            temperature=0.6,
+            top_p=0.9,
+        )
+        return response.choices[0].text.strip()
     except Exception as e:
-        print(f"LLM API error: {e}")
+        print(f"vLLM error: {e}")
         return ''
 
 def summarize_news():
     articles = get_recent_news()
-
+    
     
     if not articles:
         print("No new articles found.")
@@ -127,7 +157,7 @@ def summarize_news():
                 f"5-Day Range: [{info['low']} - {info['high']}]\n"
             )
 
-    # Map Phase: Summarize articles in small batches (e.g., 100 articles at a time) Batch sized increased using qwen3:30b now 
+    # Map Phase: Summarize articles in small batches 
     partial_summaries = []
     for i in range(0, len(articles), 50):
         batch = articles[i:i+50]
@@ -208,29 +238,66 @@ def summarize_news():
 
 def save_summary_to_db(summary_text):
     if not summary_text or len(summary_text.strip()) < 10:
-        print ("Summary too short or empty. Skipping save.")
+        print("Summary too short or empty. Skipping save.")
         return
+
+    # Try to parse JSON from LLM output
+    summary_json = None
+    batch_count = 0
+    try:
+        # Strip markdown code fences if present
+        clean = summary_text.strip()
+        if clean.startswith("```"):
+            clean = clean.split("\n", 1)[-1]
+            if clean.endswith("```"):
+                clean = clean[:-3].strip()
+        summary_json = json.loads(clean)
+        batch_count = summary_json.get("metadata", {}).get("articles_processed", 0)
+    except (json.JSONDecodeError, AttributeError):
+        # Fallback: store raw text, no JSONB
+        print("Summary not valid JSON — stored as text only.")
 
     try:
         conn = psycopg2.connect(
-            host=os.getenv('DB_HOST').strip(),
-            database=os.getenv('DB_NAME').strip(),
-            user=os.getenv('DB_USER').strip(),
-            password=os.getenv('DB_PASSWORD').strip(),
+            host=os.getenv('DB_HOST', 'postgres-service').strip(),
+            database=os.getenv('DB_NAME', 'news_app_db').strip(),
+            user=os.getenv('DB_USER', 'news_app').strip(),
+            password=os.getenv('DB_PASSWORD', '').strip(),
             port=os.getenv('DB_PORT', '5432').strip()
         )
         cur = conn.cursor()
-        
-        # Insert the summary; batch_timestamp defaults to NOW()
-        query = "INSERT INTO article_summaries (summary_text) VALUES (%s);"
-        cur.execute(query, (summary_text,))
-        
+
+        # Ensure table + columns exist (idempotent migration)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS article_summaries (
+                id SERIAL PRIMARY KEY,
+                summary_text TEXT NOT NULL,
+                summary_json JSONB,
+                is_master_summary BOOLEAN DEFAULT FALSE,
+                batch_count INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            ALTER TABLE article_summaries ADD COLUMN IF NOT EXISTS summary_json JSONB;
+            ALTER TABLE article_summaries ADD COLUMN IF NOT EXISTS is_master_summary BOOLEAN DEFAULT FALSE;
+            ALTER TABLE article_summaries ADD COLUMN IF NOT EXISTS batch_count INTEGER DEFAULT 0;
+            ALTER TABLE article_summaries ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+            CREATE INDEX IF NOT EXISTS idx_article_summaries_created ON article_summaries(created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_article_summaries_json ON article_summaries USING GIN(summary_json);
+        """)
+
+        # Insert with JSONB
+        cur.execute(
+            "INSERT INTO article_summaries (summary_text, summary_json, is_master_summary, batch_count) VALUES (%s, %s, %s, %s);",
+            (summary_text, json.dumps(summary_json) if summary_json else None, True, batch_count)
+        )
+
         conn.commit()
-        print("Master summary saved to database successfully.")
-        
+        print(f"Master summary saved to database (JSON: {'yes' if summary_json else 'no'}, articles: {batch_count}).")
+
         cur.close()
         conn.close()
     except Exception as e:
         print(f"Error saving summary to DB: {e}")
+
 if __name__ == "__main__":
     summarize_news() 

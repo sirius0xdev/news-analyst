@@ -216,9 +216,17 @@ def save_summary_to_db(summary_text):
         query = """CREATE TABLE IF NOT EXISTS article_summaries (
                 id SERIAL PRIMARY KEY,
                 summary_text TEXT NOT NULL,
+                summary_json JSONB,
                 is_master_summary BOOLEAN DEFAULT FALSE,
+                batch_count INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
+                ALTER TABLE article_summaries ADD COLUMN IF NOT EXISTS summary_json JSONB;
+                ALTER TABLE article_summaries ADD COLUMN IF NOT EXISTS is_master_summary BOOLEAN DEFAULT FALSE;
+                ALTER TABLE article_summaries ADD COLUMN IF NOT EXISTS batch_count INTEGER DEFAULT 0;
+                ALTER TABLE article_summaries ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+                CREATE INDEX IF NOT EXISTS idx_article_summaries_created ON article_summaries(created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_article_summaries_json ON article_summaries USING GIN(summary_json);
                 GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO news_app;
                 GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO news_app;
                 INSERT INTO article_summaries (summary_text) VALUES (%s);"""
