@@ -120,11 +120,13 @@ def call_llm(prompt):
         response = client.completions.create(
             model=MODEL_NAME,
             prompt=prompt,
-            max_tokens=2048,
-            temperature=0.6,
+            max_tokens=4096,
+            temperature=0.3,
             top_p=0.9,
         )
-        return response.choices[0].text.strip()
+        text = response.choices[0].text.strip()
+        print(f"LLM response: {len(text)} chars, {len(text.split())} tokens (approx)")
+        return text
     except Exception as e:
         print(f"vLLM error: {e}")
         return ''
@@ -140,22 +142,32 @@ def summarize_news():
     print(f"Processing {len(articles)} articles...")
     # ── Fetch current prices here ──
     current_prices = fetch_current_futures_prices()
-    
+
     # Build clean, readable context block for the LLM
     timestamp_str = datetime.now().strftime('%Y-%m-%d %H:%M UTC')
-    
-    price_context = "MARKET TAPE & CONVICTION DATA:\n"
+
+    price_context = f"## LIVE MARKET TAPE & CONVICTION DATA (as of {timestamp_str})\n"
+    price_context += "CRITICAL: You MUST use ONLY the price levels from this live tape section when generating trading signals. Never fabricate prices.\n\n"
+    live_count = 0
     for ticker, info in current_prices.items():
         if info.get('price') is not None:
-            # Add a qualitative tag for the LLM to latch onto
-            conviction = "EXCESSIVE VOLUME" if info['vol_ratio'] > 2.0 else "NORMAL"
-            
+            conviction = "EXCESSIVE VOLUME" if info.get('vol_ratio', 1) > 2.0 else "NORMAL"
             price_context += (
                 f"- {ticker} ({info['category']}): ${info['price']:.2f} | "
                 f"Chg: {info['change_pct']:+.2f}% | "
-                f"Vol-Ratio: {info['vol_ratio']}x ({conviction}) | "
-                f"5-Day Range: [{info['low']} - {info['high']}]\n"
+                f"Vol-Ratio: {info.get('vol_ratio', 'N/A')}x ({conviction}) | "
+                f"5-Day Range: [{info.get('low', 'N/A')} - {info.get('high', 'N/A')}] | "
+                f"Volume: {info.get('volume', 'N/A')}\n"
             )
+            live_count += 1
+        else:
+            price_context += f"- {ticker}: **NO DATA** (yfinance unavailable)\n"
+
+    if live_count == 0:
+        print(f"WARNING: yfinance returned 0 live prices at {timestamp_str}. ALL trading signals will be flagged as no_data.")
+        price_context += "\n**WARNING: No live market data available. Set all price levels to null and trading_signals to [].**\n"
+    else:
+        print(f"Fetched live prices for {live_count} tickers at {timestamp_str}")
 
     # Map Phase: Summarize articles in small batches 
     partial_summaries = []
