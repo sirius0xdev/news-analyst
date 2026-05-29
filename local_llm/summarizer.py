@@ -120,7 +120,7 @@ def call_llm(prompt):
         response = client.completions.create(
             model=MODEL_NAME,
             prompt=prompt,
-            max_tokens=4096,
+            max_tokens=8192,
             temperature=0.3,
             top_p=0.9,
         )
@@ -211,8 +211,10 @@ def summarize_news():
         map_prompt_template = price_context + os.getenv("MAP_PROMPT", map_prompt_default)
         if not map_prompt_template:
             raise ValueError("MAP_PROMPT env is required")
+        # Escape literal braces in dynamic content so .format() doesn't choke
+        escaped_batch = batch_text.replace("{", "{{").replace("}", "}}")
         try:
-            map_prompt = map_prompt_template.format(batch_text=batch_text)
+            map_prompt = map_prompt_template.format(batch_text=escaped_batch)
         except KeyError as e:
             print(f"Format KeyError: {e} - Check placeholder name in configmap matches 'batch_text'")
             map_prompt = map_prompt_template 
@@ -231,11 +233,13 @@ def summarize_news():
     DATA:
     {final_input}
     """
-    summary_prompt_template = price_context + os.getenv("SUMMARY_PROMPT", FINAL_PROMPT_DEFAULT)  
+    summary_prompt_template = price_context + os.getenv("SUMMARY_PROMPT", FINAL_PROMPT_DEFAULT)
     if not summary_prompt_template:
         raise ValueError("SUMMARY_PROMPT env is required")
+    # Escape literal braces in dynamic content so .format() doesn't choke
+    escaped_input = final_input.replace("{", "{{").replace("}", "}}")
     try:
-        master_prompt = summary_prompt_template.format(final_input=final_input)
+        master_prompt = summary_prompt_template.format(final_input=escaped_input)
     except KeyError as e:
         print(f"Format KeyError: {e} - Check placeholder name in configmap matches 'final_input'")
         master_prompt = summary_prompt_template
