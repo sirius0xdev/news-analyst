@@ -213,7 +213,7 @@ def save_summary_to_db(summary_text):
         cur = conn.cursor()
         
         # Insert the summary; batch_timestamp defaults to NOW()
-        query = """"CREATE TABLE IF NOT EXISTS article_summaries (
+        query = """CREATE TABLE IF NOT EXISTS article_summaries (
                 id SERIAL PRIMARY KEY,
                 summary_text TEXT NOT NULL,
                 is_master_summary BOOLEAN DEFAULT FALSE,
